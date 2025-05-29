@@ -1,6 +1,7 @@
 package crawler
 
 import (
+	"encoding/json"
 	"fmt"
 	"lieu/types"
 	"lieu/util"
@@ -8,13 +9,19 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly/v2"
 	"github.com/gocolly/colly/v2/queue"
 )
+
+// WebringLink represents a link from the webring with its precrawl depth
+type WebringLink struct {
+	URL   string
+	Depth int
+}
 
 // the following domains are excluded from crawling & indexing, typically because they have a lot of microblog pages
 // (very spammy)
@@ -69,36 +76,54 @@ func getLink(target string) string {
 	return strings.TrimSuffix(target, "/")
 }
 
-func getWebringLinks(path string) []string {
-	var links []string
+func getWebringLinks(path string) []WebringLink {
+	var links []WebringLink
 	candidates := util.ReadList(path, "\n")
 	for _, l := range candidates {
-		u, err := url.Parse(l)
+		// Parse the format "URL | depth"
+		parts := strings.Split(l, " | ")
+		if len(parts) != 2 {
+			continue
+		}
+		
+		urlStr := strings.TrimSpace(parts[0])
+		depthStr := strings.TrimSpace(parts[1])
+		
+		u, err := url.Parse(urlStr)
 		if err != nil {
 			continue
 		}
 		if u.Scheme == "" {
 			u.Scheme = "https"
 		}
-		links = append(links, u.String())
+		
+		depth := 1 // default depth
+		if d, err := strconv.Atoi(depthStr); err == nil {
+			depth = d
+		}
+		
+		links = append(links, WebringLink{
+			URL:   u.String(),
+			Depth: depth,
+		})
 	}
 	return links
 }
 
-func getDomains(links []string) ([]string, []string) {
+func getDomains(links []WebringLink) ([]string, []string) {
 	var domains []string
 	// sites which should have stricter crawling enforced (e.g. applicable for shared sites like tilde sites)
 	// pathsites are sites that are passed in which contain path,
 	// e.g. https://example.com/site/lupin -> only children pages of /site/lupin/ will be crawled
 	var pathsites []string
-	for _, l := range links {
-		u, err := url.Parse(l)
+	for _, link := range links {
+		u, err := url.Parse(link.URL)
 		if err != nil {
 			continue
 		}
 		domains = append(domains, u.Hostname())
 		if len(u.Path) > 0 && (u.Path != "/" || u.Path != "index.html") {
-			pathsites = append(pathsites, l)
+			pathsites = append(pathsites, link.URL)
 		}
 	}
 	return domains, pathsites
@@ -121,38 +146,50 @@ func cleanText(s string) string {
 	return s
 }
 
-func handleIndexing(c *colly.Collector, previewQueries []string, heuristics []string) {
+func handleIndexing(c *colly.Collector, previewQueries []string, heuristics []string, precrawlDepths map[string]int) {
 	c.OnHTML("meta[name=\"keywords\"]", func(e *colly.HTMLElement) {
-		fmt.Println("keywords", cleanText(e.Attr("content")), e.Request.URL)
+		domain := e.Request.URL.Hostname()
+		depth := precrawlDepths[domain]
+		fmt.Println("keywords", cleanText(e.Attr("content")), e.Request.URL, depth)
 	})
 
 	c.OnHTML("meta[name=\"description\"]", func(e *colly.HTMLElement) {
 		desc := cleanText(e.Attr("content"))
 		if len(desc) > 0 && len(desc) < 1500 {
-			fmt.Println("desc", desc, e.Request.URL)
+			domain := e.Request.URL.Hostname()
+			depth := precrawlDepths[domain]
+			fmt.Println("desc", desc, e.Request.URL, depth)
 		}
 	})
 
 	c.OnHTML("meta[property=\"og:description\"]", func(e *colly.HTMLElement) {
 		ogDesc := cleanText(e.Attr("content"))
 		if len(ogDesc) > 0 && len(ogDesc) < 1500 {
-			fmt.Println("og-desc", ogDesc, e.Request.URL)
+			domain := e.Request.URL.Hostname()
+			depth := precrawlDepths[domain]
+			fmt.Println("og-desc", ogDesc, e.Request.URL, depth)
 		}
 	})
 
 	c.OnHTML("html[lang]", func(e *colly.HTMLElement) {
 		lang := cleanText(e.Attr("lang"))
 		if len(lang) > 0 && len(lang) < 100 {
-			fmt.Println("lang", lang, e.Request.URL)
+			domain := e.Request.URL.Hostname()
+			depth := precrawlDepths[domain]
+			fmt.Println("lang", lang, e.Request.URL, depth)
 		}
 	})
 
 	// get page title
 	c.OnHTML("title", func(e *colly.HTMLElement) {
-		fmt.Println("title", cleanText(e.Text), e.Request.URL)
+		domain := e.Request.URL.Hostname()
+		depth := precrawlDepths[domain]
+		fmt.Println("title", cleanText(e.Text), e.Request.URL, depth)
 	})
 
 	c.OnHTML("body", func(e *colly.HTMLElement) {
+		domain := e.Request.URL.Hostname()
+		depth := precrawlDepths[domain]
 	QueryLoop:
 		for i := 0; i < len(previewQueries); i++ {
 			// After the fourth paragraph we're probably too far in to get something interesting for a preview
@@ -162,7 +199,7 @@ func handleIndexing(c *colly.Collector, previewQueries []string, heuristics []st
 				paragraph := cleanText(element_text)
 				if len(paragraph) < 1500 && len(paragraph) > 20 {
 					if !util.Contains(heuristics, strings.ToLower(paragraph)) {
-						fmt.Println("para", paragraph, e.Request.URL)
+						fmt.Println("para", paragraph, e.Request.URL, depth)
 						break QueryLoop
 					}
 				}
@@ -170,20 +207,20 @@ func handleIndexing(c *colly.Collector, previewQueries []string, heuristics []st
 		}
 		paragraph := cleanText(e.DOM.Find("p").First().Text())
 		if len(paragraph) < 1500 && len(paragraph) > 0 {
-			fmt.Println("para-just-p", paragraph, e.Request.URL)
+			fmt.Println("para-just-p", paragraph, e.Request.URL, depth)
 		}
 
 		// get all relevant page headings
-		collectHeadingText("h1", e)
-		collectHeadingText("h2", e)
-		collectHeadingText("h3", e)
+		collectHeadingText("h1", e, depth)
+		collectHeadingText("h2", e, depth)
+		collectHeadingText("h3", e, depth)
 	})
 }
 
-func collectHeadingText(heading string, e *colly.HTMLElement) {
+func collectHeadingText(heading string, e *colly.HTMLElement, depth int) {
 	for _, headingText := range e.ChildTexts(heading) {
 		if len(headingText) < 500 {
-			fmt.Println(heading, cleanText(headingText), e.Request.URL)
+			fmt.Println(heading, cleanText(headingText), e.Request.URL, depth)
 		}
 	}
 }
@@ -208,6 +245,13 @@ func SetupDefaultProxy(config types.Config) error {
 	return nil
 }
 
+type Mushroom struct {
+	Spores   []string `json:"spores"`
+	Hyphae   []string `json:"hyphae"`
+	ID       string   `json:"id"`
+	Location string   `json:"location"`
+}
+
 func Precrawl(config types.Config) {
 	// setup proxy
 	err := SetupDefaultProxy(config)
@@ -216,26 +260,45 @@ func Precrawl(config types.Config) {
 	}
 
 	res, err := http.Get(config.General.URL)
-	util.Check(err)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	defer res.Body.Close()
 
 	if res.StatusCode != 200 {
 		log.Fatal("status not 200")
 	}
 
-	doc, err := goquery.NewDocumentFromReader(res.Body)
-	util.Check(err)
+	var alreadyCrawled []string
+	var seenDomains []string
+	var exploredHyphae []string
+	var currentDepth = 1
 
-	items := make([]string, 0)
-	s := doc.Find("html")
-	query := config.General.WebringSelector
-	if query == "" {
-		query = "li > a[href]:first-of-type"
+	// Helper function to normalize domain for duplicate detection
+	normalizeDomain := func(link string) string {
+		u, err := url.Parse(link)
+		if err != nil {
+			return ""
+		}
+		domain := u.Hostname()
+		// Remove www prefix for comparison
+		if strings.HasPrefix(domain, "www.") {
+			domain = strings.TrimPrefix(domain, "www.")
+		}
+		return domain
 	}
-	util.QuerySelector(query, s, &items)
 
+	var mushroom Mushroom
+	if err := json.NewDecoder(res.Body).Decode(&mushroom); err != nil {
+		log.Printf("Error decoding JSON from %s: %v", config.General.URL, err)
+		return
+	}
+
+	// Process initial spores at depth 1
 	BANNED := getBannedDomains(config.Crawler.BannedDomains)
-	for _, item := range items {
+	for _, item := range mushroom.Spores {
 		link := getLink(item)
 		u, err := url.Parse(link)
 		// invalid link
@@ -243,10 +306,81 @@ func Precrawl(config types.Config) {
 			continue
 		}
 		domain := u.Hostname()
-		if find(BANNED, domain) {
+		normalizedDomain := normalizeDomain(link)
+		
+		if find(BANNED, domain) || find(alreadyCrawled, link) || find(seenDomains, normalizedDomain) {
 			continue
 		}
-		fmt.Println(link)
+		fmt.Printf("%s | %d\n", link, currentDepth)
+		alreadyCrawled = append(alreadyCrawled, link)
+		seenDomains = append(seenDomains, normalizedDomain)
+	}
+
+	// Collect initial hyphae to explore
+	var currentLevelHyphae []string
+	for _, item := range mushroom.Hyphae {
+		link := getLink(item)
+		if !find(exploredHyphae, link) {
+			currentLevelHyphae = append(currentLevelHyphae, link)
+		}
+	}
+
+	for len(currentLevelHyphae) > 0 {
+		currentDepth++
+		var nextLevelHyphae []string
+
+		// Process all hyphae at the current level
+		for _, hyphaeLink := range currentLevelHyphae {
+			if find(exploredHyphae, hyphaeLink) {
+				continue
+			}
+
+			res, err := http.Get(hyphaeLink)
+			exploredHyphae = append(exploredHyphae, hyphaeLink)
+
+			if err != nil {
+				log.Printf("Error fetching %s: %v", hyphaeLink, err)
+				continue
+			}
+
+			defer res.Body.Close()
+
+			var currentMushroom Mushroom
+			if err := json.NewDecoder(res.Body).Decode(&currentMushroom); err != nil {
+				log.Printf("Error decoding JSON from %s: %v", hyphaeLink, err)
+				continue
+			}
+
+			// Process spores at current depth
+			for _, item := range currentMushroom.Spores {
+				link := getLink(item)
+				u, err := url.Parse(link)
+				// invalid link
+				if err != nil {
+					continue
+				}
+				domain := u.Hostname()
+				normalizedDomain := normalizeDomain(link)
+				
+				if find(BANNED, domain) || find(alreadyCrawled, link) || find(seenDomains, normalizedDomain) {
+					continue
+				}
+				fmt.Printf("%s | %d\n", link, currentDepth)
+				alreadyCrawled = append(alreadyCrawled, link)
+				seenDomains = append(seenDomains, normalizedDomain)
+			}
+
+			// Collect hyphae for next level
+			for _, item := range currentMushroom.Hyphae {
+				link := getLink(item)
+				if !find(exploredHyphae, link) && !find(nextLevelHyphae, link) {
+					nextLevelHyphae = append(nextLevelHyphae, link)
+				}
+			}
+		}
+
+		// Move to next level
+		currentLevelHyphae = nextLevelHyphae
 	}
 }
 
@@ -260,6 +394,16 @@ func Crawl(config types.Config) {
 	links := getWebringLinks(config.Crawler.Webring)
 	domains, pathsites := getDomains(links)
 	initialDomain := config.General.URL
+
+	// Create a map to store precrawl depths for each domain
+	precrawlDepths := make(map[string]int)
+	for _, link := range links {
+		u, err := url.Parse(link.URL)
+		if err != nil {
+			continue
+		}
+		precrawlDepths[u.Hostname()] = link.Depth
+	}
 
 	// TODO: introduce c2 for scraping links (with depth 1) linked to from webring domains
 	// instantiate default collector
@@ -276,10 +420,10 @@ func Crawl(config types.Config) {
 	)
 
 	for _, link := range links {
-		q.AddURL(link)
+		q.AddURL(link.URL)
 	}
 
-	c.UserAgent = "Lieu"
+	c.UserAgent = "MoldWeb_crawler"
 	c.AllowedDomains = domains
 	c.AllowURLRevisit = false
 	c.DisallowedDomains = getBannedDomains(config.Crawler.BannedDomains)
@@ -315,11 +459,14 @@ func Crawl(config types.Config) {
 
 		// log which site links to what
 		if !util.Contains(boringWords, link) && !util.Contains(boringDomains, link) {
+			currentDepth := precrawlDepths[currentDomain]
+			// log precrawl depths
+			// fmt.Println("currentDepth", currentDomain, outgoingDomain, currentDepth)
 			if !find(domains, outgoingDomain) {
-				fmt.Println("non-webring-link", link, e.Request.URL)
+				fmt.Println("non-webring-link", link, e.Request.URL, currentDepth)
 				// solidarity! someone in the webring linked to someone else in it
 			} else if outgoingDomain != currentDomain && outgoingDomain != initialDomain && currentDomain != initialDomain {
-				fmt.Println("webring-link", link, e.Request.URL)
+				fmt.Println("webring-link", link, e.Request.URL, currentDepth)
 			}
 		}
 
@@ -344,7 +491,7 @@ func Crawl(config types.Config) {
 		}
 	})
 
-	handleIndexing(c, previewQueries, heuristics)
+	handleIndexing(c, previewQueries, heuristics, precrawlDepths)
 
 	// start scraping
 	q.Run(c)

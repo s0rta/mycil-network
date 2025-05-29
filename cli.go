@@ -48,6 +48,8 @@ func main() {
 		cmd = "help"
 	}
 
+	// cmd = "host"
+
 	switch cmd {
 	case "help":
 		fmt.Println(help)

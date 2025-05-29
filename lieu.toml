@@ -1,9 +1,9 @@
 [general]
-name = "Sweet Webring"
-tagline = "the search for the new—endless"
+name = "Mold Net"
+tagline = "The web is rotting, enjoy it"
 placeholder = "Search"
 # used by the precrawl command and linked to in /about route
-url = "https://example.com/"
+url = "https://yet.earth/spores.json"
 port = 10001
 
 [data]
