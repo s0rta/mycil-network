@@ -12,6 +12,7 @@ type PageData struct {
 	About       string
 	Lang        string
 	AboutSource string
+	Depth       int
 }
 
 type Config struct {

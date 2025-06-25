@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,13 +72,25 @@ func Ingest(config types.Config) {
 
 	wordlist := util.ReadList(config.Data.Wordlist, "|")
 
-	buf, err := os.Open(config.Data.Source)
-	util.Check(err)
+	fmt.Printf("Opening source file: %s\n", config.Data.Source)
+	file, err := os.Open(config.Data.Source)
+	if err != nil {
+		fmt.Printf("Error opening file: %v\n", err)
+		util.Check(err)
+	}
 
 	defer func() {
-		err = buf.Close()
+		err = file.Close()
 		util.Check(err)
 	}()
+
+	// Get file info to verify size
+	fileInfo, err := file.Stat()
+	if err != nil {
+		fmt.Printf("Error getting file info: %v\n", err)
+		util.Check(err)
+	}
+	fmt.Printf("File size: %d bytes\n", fileInfo.Size())
 
 	pages := make(map[string]types.PageData)
 	var count int
@@ -85,17 +98,56 @@ func Ingest(config types.Config) {
 	batch := make([]types.SearchFragment, 0, 0)
 	var externalLinks []string
 
-	scanner := bufio.NewScanner(buf)
-	for scanner.Scan() {
-		line := scanner.Text()
-		firstSpace := strings.Index(line, " ")
-		lastSpace := strings.LastIndex(line, " ")
+	// Try reading the first line directly to verify content
+	reader := bufio.NewReader(file)
+	firstLine, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Printf("Error reading first line: %v\n", err)
+		util.Check(err)
+	}
+	fmt.Printf("First line read: %s", firstLine)
 
-		if len(line) == 0 || firstSpace == -1 {
+	// Reset file position to start
+	_, err = file.Seek(0, 0)
+	if err != nil {
+		fmt.Printf("Error seeking to start of file: %v\n", err)
+		util.Check(err)
+	}
+
+	scanner := bufio.NewScanner(file)
+	// Increase buffer size to handle longer lines (1MB)
+	scannerBuf := make([]byte, 1024*1024)
+	scanner.Buffer(scannerBuf, 1024*1024)
+
+	lineCount := 0
+	fmt.Println("Starting to scan file...")
+	for scanner.Scan() {
+		lineCount++
+		if lineCount % 100000 == 0 {
+			fmt.Printf("Processed %d lines\n", lineCount)
+		}
+		line := scanner.Text()
+		if lineCount == 1 {
+			fmt.Printf("First line from scanner: %s\n", line)
+		}
+		parts := strings.Split(line, " ")
+		if len(parts) < 3 {
+			fmt.Printf("Skipping malformed line: %s\n", line)
 			continue
 		}
 
-		pageurl := strings.TrimSuffix(strings.TrimSpace(line[lastSpace:len(line)]), "/")
+		token := parts[0]
+		// The last part is the depth
+		depth := 0
+		if d, err := strconv.Atoi(parts[len(parts)-1]); err == nil {
+			depth = d
+		}
+		// The second to last part is the URL
+		pageurl := strings.TrimSuffix(parts[len(parts)-2], "/")
+		// Everything in between is the content
+		rawdata := strings.Join(parts[1:len(parts)-2], " ")
+		payload := strings.ToLower(rawdata)
+
 		if !strings.HasPrefix(pageurl, "http") {
 			continue
 		}
@@ -105,11 +157,8 @@ func Ingest(config types.Config) {
 			page = data
 		} else {
 			page.URL = pageurl
+			page.Depth = depth
 		}
-
-		token := line[0:firstSpace]
-		rawdata := strings.TrimSpace(line[firstSpace:lastSpace])
-		payload := strings.ToLower(rawdata)
 
 		var processed []string
 		score := 1

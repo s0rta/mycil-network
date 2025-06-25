@@ -18,8 +18,8 @@ import (
 	"lieu/util"
 	"log"
 	"net/url"
-	"strings"
 	"regexp"
+	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -60,6 +60,7 @@ func createTables(db *sql.DB) {
         about TEXT,
         lang TEXT,
         domain TEXT NOT NULL,
+        depth INTEGER NOT NULL DEFAULT 0,
         FOREIGN KEY(domain) REFERENCES domains(domain)
     );
     `,
@@ -277,15 +278,14 @@ func SearchWords(db *sql.DB, words []string, searchByScore bool, domain []string
 	}
 
 	query := fmt.Sprintf(`
-    SELECT p.url, p.about, p.title 
+    SELECT p.url, p.about, p.title, p.depth
     FROM inv_index inv INNER JOIN pages p ON inv.url = p.url 
     WHERE (%s)
     AND (%s)
     AND (%s)
     AND (%s)
     GROUP BY inv.url 
-    ORDER BY %s
-    DESC
+    ORDER BY p.depth ASC, %s DESC
     LIMIT 15
     `, strings.Join(wordlist, " OR "), strings.Join(domains, " OR "), strings.Join(nodomains, " AND "), strings.Join(languages, " OR "), orderType)
 
@@ -300,7 +300,7 @@ func SearchWords(db *sql.DB, words []string, searchByScore bool, domain []string
 	var pageData types.PageData
 	var pages []types.PageData
 	for rows.Next() {
-		if err := rows.Scan(&pageData.URL, &pageData.About, &pageData.Title); err != nil {
+		if err := rows.Scan(&pageData.URL, &pageData.About, &pageData.Title, &pageData.Depth); err != nil {
 			log.Fatalln(err)
 		}
 		pages = append(pages, pageData)
@@ -335,14 +335,14 @@ func InsertManyPages(db *sql.DB, pages []types.PageData) {
 	args := make([]interface{}, 0, len(pages))
 
 	for _, b := range pages {
-		// url, title, lang, about, domain
-		values = append(values, "(?, ?, ?, ?, ?)")
+		// url, title, lang, about, domain, depth
+		values = append(values, "(?, ?, ?, ?, ?, ?)")
 		u, err := url.Parse(b.URL)
 		util.Check(err)
-		args = append(args, b.URL, b.Title, b.Lang, b.About, u.Hostname())
+		args = append(args, b.URL, b.Title, b.Lang, b.About, u.Hostname(), b.Depth)
 	}
 
-	stmt := fmt.Sprintf(`INSERT OR IGNORE INTO pages(url, title, lang, about, domain) VALUES %s`, strings.Join(values, ","))
+	stmt := fmt.Sprintf(`INSERT OR IGNORE INTO pages(url, title, lang, about, domain, depth) VALUES %s`, strings.Join(values, ","))
 	_, err := db.Exec(stmt, args...)
 	util.Check(err)
 }
