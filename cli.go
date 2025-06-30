@@ -45,7 +45,7 @@ func main() {
 	if len(os.Args) > 1 {
 		cmd = os.Args[1]
 	} else {
-		cmd = "help"
+		cmd = "host"
 	}
 
 	// cmd = "host"
